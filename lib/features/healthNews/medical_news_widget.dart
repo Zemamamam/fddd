@@ -106,9 +106,12 @@ class _MedicalNewsWidgetState extends State<MedicalNewsWidget> {
             builder: (context, _) {
               final screenSize = MediaQuery.sizeOf(context);
               final screenWidth = screenSize.width;
-              final tickerHeight = math.min(math.max(screenSize.height * 0.10, 96.0), 132.0);
-              final imageHeight = tickerHeight * 0.42;
-              final cardWidth = math.min(math.max(screenWidth * 0.78, 220.0), 320.0);
+              final compact = screenWidth < 360;
+              final tickerHeight = math.min(math.max(screenSize.height * 0.11, compact ? 112.0 : 118.0), 144.0);
+              final imageHeight = tickerHeight * (compact ? 0.34 : 0.36);
+              final cardWidth = math.min(math.max(screenWidth * (compact ? 0.82 : 0.74), 210.0), 300.0);
+              final titleSize = compact ? 12.5 : 13.5;
+              final sourceSize = compact ? 10.5 : 11.0;
               return SizedBox(
                 height: tickerHeight,
                 child: ListView.builder(
@@ -159,28 +162,25 @@ class _MedicalNewsWidgetState extends State<MedicalNewsWidget> {
                             ),
                             Expanded(
                               child: Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                child: SingleChildScrollView(
-                                  physics: const ClampingScrollPhysics(),
-                                  child: Column(
+                                padding: EdgeInsets.symmetric(horizontal: compact ? 8 : 10, vertical: compact ? 5 : 6),
+                                child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
+mainAxisSize: MainAxisSize.min,
                                     children: [
                                       Text(
                                         article.title,
-                                        maxLines: 3,
+                                        maxLines: compact ? 2 : 3,
                                         overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(fontWeight: FontWeight.bold, height: 1.25),
+                                        style: TextStyle(fontWeight: FontWeight.bold, height: 1.2, fontSize: titleSize),
                                       ),
-                                      const SizedBox(height: 6),
+                                      SizedBox(height: compact ? 3 : 4),
                                       Text(
                                         article.source,
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(fontSize: 12, color: Colors.grey),
+                                        style: TextStyle(fontSize: sourceSize, color: Colors.grey, height: 1.1),
                                       ),
                                     ],
-                                  ),
                                 ),
                               ),
                             ),
