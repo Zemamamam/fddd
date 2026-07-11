@@ -41,6 +41,7 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
   List<Map<String, dynamic>> _workplaces = [];
   Map<String, List<String>> _availableTimes = {};
   Map<String, List<String>> _bookedTimes = {};
+  final Map<String, Map<String, _DayAvailabilityStatus>> _availabilityCache = {};
 
   final List<String> specialties = [
     'القلب',
@@ -102,6 +103,7 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
         _selectedLocation = null;
         _availableTimes = {};
         _bookedTimes = {};
+        _availabilityCache.clear();
       });
     }
   }
@@ -151,12 +153,9 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
             print('✅ الوقت المتاح: $timeStr');
           }
 
-          // إضافة 30 دقيقة
-          currentMinute += 30;
-          if (currentMinute >= 60) {
-            currentMinute -= 60;
-            currentHour += 1;
-          }
+          // إضافة ساعة كاملة فقط
+          currentHour += 1;
+          currentMinute = 0;
         }
       }
 
@@ -167,6 +166,316 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
         _availableTimes[workplaceName] = availableTimes;
       });
     }
+  }
+
+
+  Future<DateTime?> _showAvailabilityDatePicker() async {
+    if (_selectedDoctor == null || _selectedWorkplace == null) return null;
+    final doctor = _doctors.firstWhere((d) => d['fullName'] == _selectedDoctor, orElse: () => {});
+    final doctorId = doctor['uid']?.toString() ?? '';
+    if (doctorId.isEmpty) return null;
+
+    final today = DateTime.now();
+    DateTime visibleMonth = DateTime(today.year, today.month);
+    Map<String, _DayAvailabilityStatus> visibleStatuses = _availabilityCache[_availabilityMonthKey(visibleMonth)] ?? {};
+    bool isLoadingMonth = visibleStatuses.isEmpty;
+    final requestedMonthKeys = <String>{};
+
+    Future<void> loadMonth(StateSetter setDialogState, DateTime month) async {
+      final monthKey = _availabilityMonthKey(month);
+      final cached = _availabilityCache[monthKey];
+      if (cached != null) {
+        setDialogState(() {
+          visibleStatuses = cached;
+          isLoadingMonth = false;
+        });
+        return;
+      }
+
+      if (!requestedMonthKeys.add(monthKey)) return;
+      setDialogState(() => isLoadingMonth = true);
+      try {
+        final loaded = await _loadMonthAvailabilityFast(doctorId, _selectedWorkplace!, month);
+        if (!mounted) return;
+        _availabilityCache[monthKey] = loaded;
+        setDialogState(() {
+          visibleStatuses = loaded;
+          isLoadingMonth = false;
+        });
+      } catch (_) {
+        if (!mounted) return;
+        setDialogState(() => isLoadingMonth = false);
+      } finally {
+        requestedMonthKeys.remove(monthKey);
+      }
+    }
+
+    return showDialog<DateTime>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            if (isLoadingMonth && visibleStatuses.isEmpty) {
+              Future.microtask(() => loadMonth(setDialogState, visibleMonth));
+            }
+
+            final theme = Theme.of(context);
+            final colorScheme = theme.colorScheme;
+            final monthDays = _calendarDaysForMonth(visibleMonth);
+
+            return Dialog(
+              insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 460),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          IconButton(
+                            tooltip: 'الشهر السابق',
+                            onPressed: () {
+                              final previous = DateTime(visibleMonth.year, visibleMonth.month - 1);
+                              setDialogState(() {
+                                visibleMonth = previous;
+                                visibleStatuses = _availabilityCache[_availabilityMonthKey(previous)] ?? {};
+                                isLoadingMonth = visibleStatuses.isEmpty;
+                              });
+                              loadMonth(setDialogState, previous);
+                            },
+                            icon: const Icon(Icons.chevron_left_rounded),
+                          ),
+                          Expanded(
+                            child: Column(
+                              children: [
+                                Text(
+                                  DateFormat('MMMM yyyy', 'ar').format(visibleMonth),
+                                  textAlign: TextAlign.center,
+                                  style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+                                ),
+                                if (isLoadingMonth)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 6),
+                                    child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(999),
+                                      child: const LinearProgressIndicator(minHeight: 3),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'الشهر التالي',
+                            onPressed: () {
+                              final next = DateTime(visibleMonth.year, visibleMonth.month + 1);
+                              setDialogState(() {
+                                visibleMonth = next;
+                                visibleStatuses = _availabilityCache[_availabilityMonthKey(next)] ?? {};
+                                isLoadingMonth = visibleStatuses.isEmpty;
+                              });
+                              loadMonth(setDialogState, next);
+                            },
+                            icon: const Icon(Icons.chevron_right_rounded),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: ['س', 'ح', 'ن', 'ث', 'ر', 'خ', 'ج'].map((day) {
+                          return Expanded(
+                            child: Center(
+                              child: Text(
+                                day,
+                                style: theme.textTheme.labelMedium?.copyWith(
+                                  color: colorScheme.primary,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 8),
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          final cellSpacing = constraints.maxWidth < 360 ? 4.0 : 6.0;
+                          return GridView.builder(
+                            shrinkWrap: true,
+                            physics: const NeverScrollableScrollPhysics(),
+                            itemCount: monthDays.length,
+                            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 7,
+                              crossAxisSpacing: cellSpacing,
+                              mainAxisSpacing: cellSpacing,
+                              childAspectRatio: .86,
+                            ),
+                            itemBuilder: (context, index) {
+                              final day = monthDays[index];
+                              final inVisibleMonth = day.month == visibleMonth.month;
+                              final isPast = day.isBefore(DateTime(today.year, today.month, today.day));
+                              final status = visibleStatuses[_appointmentDateKey(day)];
+                              final disabled = isPast || !inVisibleMonth || status == null || status == _DayAvailabilityStatus.full || status == _DayAvailabilityStatus.offDay;
+                              final color = status == null
+                                  ? colorScheme.outline
+                                  : _availabilityColor(status, theme);
+                              return InkWell(
+                                borderRadius: BorderRadius.circular(14),
+                                onTap: disabled ? null : () => Navigator.pop(dialogContext, day),
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 180),
+                                  padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 2),
+                                  decoration: BoxDecoration(
+                                    color: color.withOpacity(disabled ? .10 : .22),
+                                    borderRadius: BorderRadius.circular(14),
+                                    border: Border.all(color: color.withOpacity(inVisibleMonth ? .9 : .25)),
+                                  ),
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Text(
+                                        DateFormat('d', 'ar').format(day),
+                                        style: theme.textTheme.bodyMedium?.copyWith(
+                                          fontWeight: FontWeight.w800,
+                                          color: inVisibleMonth ? colorScheme.onSurface : colorScheme.outline,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Container(
+                                        width: 8,
+                                        height: 8,
+                                        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 14),
+                      _availabilityLegend(theme),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: AlignmentDirectional.centerEnd,
+                        child: TextButton(
+                          onPressed: () => Navigator.pop(dialogContext),
+                          child: const Text('إلغاء'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  String _availabilityMonthKey(DateTime month) => DateFormat('yyyyMM').format(month);
+
+  List<DateTime> _calendarDaysForMonth(DateTime month) {
+    final firstDay = DateTime(month.year, month.month);
+    final leadingDays = firstDay.weekday % 7;
+    final gridStart = firstDay.subtract(Duration(days: leadingDays));
+    return List.generate(42, (index) => DateTime(gridStart.year, gridStart.month, gridStart.day + index));
+  }
+
+  Widget _availabilityLegend(ThemeData theme) {
+    return Wrap(
+      spacing: 10,
+      runSpacing: 8,
+      children: const [
+        _LegendDot(color: Colors.green, label: 'متاح بالكامل'),
+        _LegendDot(color: Colors.amber, label: 'متاح جزئياً'),
+        _LegendDot(color: Colors.red, label: 'ممتلئ'),
+        _LegendDot(color: Colors.blue, label: 'لا يوجد دوام'),
+      ],
+    );
+  }
+
+  Color _availabilityColor(_DayAvailabilityStatus status, ThemeData theme) {
+    switch (status) {
+      case _DayAvailabilityStatus.free:
+        return Colors.green;
+      case _DayAvailabilityStatus.partial:
+        return Colors.amber;
+      case _DayAvailabilityStatus.full:
+        return Colors.red;
+      case _DayAvailabilityStatus.offDay:
+        return Colors.blue;
+    }
+  }
+
+  Future<Map<String, _DayAvailabilityStatus>> _loadMonthAvailabilityFast(String doctorId, String workplaceName, DateTime month) async {
+    final firstMonthDay = DateTime(month.year, month.month);
+    final visibleDays = _calendarDaysForMonth(firstMonthDay);
+    final firstVisibleDay = visibleDays.first;
+    final lastVisibleDay = DateTime(visibleDays.last.year, visibleDays.last.month, visibleDays.last.day, 23, 59, 59);
+
+    final bookedByDate = <String, Set<String>>{};
+    final appointmentsQuery = _firestore
+        .collection('appointments')
+        .where('doctorId', isEqualTo: doctorId)
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(firstVisibleDay))
+        .where('date', isLessThanOrEqualTo: Timestamp.fromDate(lastVisibleDay))
+        .get();
+    final slotsQuery = _firestore
+        .collection('appointment_slots')
+        .where('doctorId', isEqualTo: doctorId)
+        .where('dateKey', isGreaterThanOrEqualTo: _appointmentDateKey(firstVisibleDay))
+        .where('dateKey', isLessThanOrEqualTo: _appointmentDateKey(lastVisibleDay))
+        .get();
+
+    final responses = await Future.wait([appointmentsQuery, slotsQuery]);
+    final appointmentsSnapshot = responses[0];
+    final slotsSnapshot = responses[1];
+
+    for (final doc in appointmentsSnapshot.docs) {
+      final data = doc.data();
+      final status = data['status'] as String?;
+      final time = data['time'] as String?;
+      final date = data['date'] as Timestamp?;
+      if (data['workplace'] == workplaceName &&
+          date != null &&
+          time != null &&
+          (status == 'pending' || status == 'confirmed')) {
+        bookedByDate.putIfAbsent(_appointmentDateKey(date.toDate()), () => <String>{}).add(time);
+      }
+    }
+
+    for (final slotDoc in slotsSnapshot.docs) {
+      final data = slotDoc.data();
+      final dateKey = data['dateKey']?.toString();
+      final time = data['time']?.toString();
+      if (data['workplace'] == workplaceName && dateKey != null && time != null) {
+        bookedByDate.putIfAbsent(dateKey, () => <String>{}).add(time);
+      }
+    }
+
+    final result = <String, _DayAvailabilityStatus>{};
+    for (final day in visibleDays) {
+      final dateKey = _appointmentDateKey(day);
+      final totalSlots = _countWorkdaySlots(workplaceName, day);
+      if (totalSlots == 0) {
+        result[dateKey] = _DayAvailabilityStatus.offDay;
+        continue;
+      }
+      final bookedCount = bookedByDate[dateKey]?.length ?? 0;
+      if (bookedCount >= totalSlots) {
+        result[dateKey] = _DayAvailabilityStatus.full;
+      } else if (bookedCount > 0) {
+        result[dateKey] = _DayAvailabilityStatus.partial;
+      } else {
+        result[dateKey] = _DayAvailabilityStatus.free;
+      }
+    }
+    return result;
   }
 
   String _appointmentDateKey(DateTime date) => DateFormat('yyyyMMdd').format(date);
@@ -348,6 +657,7 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
         transaction.set(appointmentRef, appointmentData);
       });
 
+      _availabilityCache.clear();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('✅ تم تأكيد الحجز بنجاح!')),
       );
@@ -428,6 +738,7 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
                       _selectedDoctor = val;
                       _availableTimes = {};
                       _bookedTimes = {};
+                      _availabilityCache.clear();
                       _selectedDate = null;
                       _selectedTime = null;
                     });
@@ -488,12 +799,7 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
                               ? 'اختر التاريخ'
                               : DateFormat('yyyy/MM/dd').format(_selectedDate!)),
                           onPressed: () async {
-                            final picked = await showDatePicker(
-                              context: context,
-                              initialDate: DateTime.now(),
-                              firstDate: DateTime.now(),
-                              lastDate: DateTime.now().add(const Duration(days: 30)),
-                            );
+                            final picked = await _showAvailabilityDatePicker();
                             if (picked != null) {
                               setState(() {
                                 _selectedDate = picked;
@@ -765,6 +1071,31 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
             ),
           );
         }).toList(),
+      ],
+    );
+  }
+}
+
+enum _DayAvailabilityStatus { free, partial, full, offDay }
+
+class _LegendDot extends StatelessWidget {
+  final Color color;
+  final String label;
+
+  const _LegendDot({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(label, style: Theme.of(context).textTheme.bodySmall),
       ],
     );
   }
