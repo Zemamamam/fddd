@@ -412,6 +412,38 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
     }
   }
 
+
+  int _countWorkdaySlots(String workplaceName, DateTime date) {
+    final dayName = DateFormat('EEEE', 'ar').format(date);
+    final doctor = _doctors.firstWhere(
+      (d) => d['fullName'] == _selectedDoctor,
+      orElse: () => {},
+    );
+    if (doctor.isEmpty) return 0;
+
+    final workplaces = List<Map<String, dynamic>>.from(doctor['workplaces'] ?? []);
+    final workplace = workplaces.firstWhere(
+      (wp) => wp['name'] == workplaceName,
+      orElse: () => {},
+    );
+    if (workplace.isEmpty) return 0;
+
+    final workDays = Map<String, dynamic>.from(workplace['workDays'] ?? {});
+    final dayTimes = List<Map<String, dynamic>>.from(workDays[dayName] ?? []);
+    var totalSlots = 0;
+
+    for (final timeSlot in dayTimes) {
+      var currentHour = (timeSlot['startHour'] as num?)?.toInt() ?? 0;
+      final endHour = (timeSlot['endHour'] as num?)?.toInt() ?? currentHour;
+      while (currentHour < endHour) {
+        totalSlots++;
+        currentHour++;
+      }
+    }
+
+    return totalSlots;
+  }
+
   Future<Map<String, _DayAvailabilityStatus>> _loadMonthAvailabilityFast(String doctorId, String workplaceName, DateTime month) async {
     final firstMonthDay = DateTime(month.year, month.month);
     final visibleDays = _calendarDaysForMonth(firstMonthDay);
