@@ -103,92 +103,102 @@ class _MedicalNewsWidgetState extends State<MedicalNewsWidget> {
           )
         else
           LayoutBuilder(
-            builder: (context, _) {
+            builder: (context, constraints) {
               final screenSize = MediaQuery.sizeOf(context);
-              final screenWidth = screenSize.width;
+              final screenWidth = constraints.maxWidth.isFinite ? constraints.maxWidth : screenSize.width;
               final compact = screenWidth < 360;
-              final tickerHeight = math.min(math.max(screenSize.height * 0.11, compact ? 112.0 : 118.0), 144.0);
-              final imageHeight = tickerHeight * (compact ? 0.34 : 0.36);
-              final cardWidth = math.min(math.max(screenWidth * (compact ? 0.82 : 0.74), 210.0), 300.0);
-              final titleSize = compact ? 12.5 : 13.5;
-              final sourceSize = compact ? 10.5 : 11.0;
+              final cardHeight = math.min(math.max(screenSize.height * 0.12, compact ? 104.0 : 112.0), 136.0);
+              final cardWidth = math.min(math.max(screenWidth * (compact ? 0.86 : 0.76), 220.0), 320.0);
+              final imageWidth = math.min(cardWidth * 0.34, 104.0);
+              final titleSize = compact ? 12.0 : 13.0;
+              final sourceSize = compact ? 10.0 : 10.5;
+
               return SizedBox(
-                height: tickerHeight,
-                child: ListView.builder(
+                height: cardHeight + 8,
+                child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  itemCount: news.length,
-                  itemBuilder: (context, index) {
-                    final article = news[index];
-                    return GestureDetector(
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => NewsDetailScreen(news: article),
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  child: Row(
+                    children: news.map((article) {
+                      return GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => NewsDetailScreen(news: article),
+                            ),
+                          );
+                        },
+                        child: Container(
+                          width: cardWidth,
+                          height: cardHeight,
+                          margin: const EdgeInsets.symmetric(horizontal: 8),
+                          clipBehavior: Clip.antiAlias,
+                          decoration: BoxDecoration(
+                            color: isDarkMode ? Colors.grey[900] : Colors.white,
+                            borderRadius: BorderRadius.circular(14),
+                            boxShadow: [
+                              BoxShadow(
+                                color: isDarkMode ? Colors.black26 : Colors.grey.withOpacity(0.12),
+                                blurRadius: isDarkMode ? 0 : 10,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
                           ),
-                        );
-                      },
-                      child: Container(
-                        width: cardWidth,
-                        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        clipBehavior: Clip.antiAlias,
-                        decoration: BoxDecoration(
-                          color: isDarkMode ? Colors.grey[900] : Colors.white,
-                          borderRadius: BorderRadius.circular(14),
-                          boxShadow: [
-                            BoxShadow(
-                              color: isDarkMode ? Colors.black26 : Colors.grey.withOpacity(0.12),
-                              blurRadius: isDarkMode ? 0 : 10,
-                              offset: const Offset(0, 4),
-                            ),
-                          ],
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            SizedBox(
-                              height: imageHeight,
-                              width: double.infinity,
-                              child: article.imageUrl.isNotEmpty
-                                  ? Image.network(
-                                      article.imageUrl,
-                                      width: double.infinity,
-                                      height: imageHeight,
-                                      fit: BoxFit.cover,
-                                      errorBuilder: (_, __, ___) => _buildImageFallback(),
-                                    )
-                                  : _buildImageFallback(),
-                            ),
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.symmetric(horizontal: compact ? 8 : 10, vertical: compact ? 5 : 6),
-                                child: Column(
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              SizedBox(
+                                width: imageWidth,
+                                child: article.imageUrl.isNotEmpty
+                                    ? Image.network(
+                                        article.imageUrl,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) => _buildImageFallback(),
+                                      )
+                                    : _buildImageFallback(),
+                              ),
+                              Expanded(
+                                child: Padding(
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: compact ? 8 : 10,
+                                    vertical: compact ? 7 : 9,
+                                  ),
+                                  child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
-mainAxisSize: MainAxisSize.min,
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                     children: [
-                                      Text(
-                                        article.title,
-                                        maxLines: compact ? 2 : 3,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(fontWeight: FontWeight.bold, height: 1.2, fontSize: titleSize),
+                                      Flexible(
+                                        child: Text(
+                                          article.title,
+                                          maxLines: compact ? 2 : 3,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            height: 1.15,
+                                            fontSize: titleSize,
+                                          ),
+                                        ),
                                       ),
-                                      SizedBox(height: compact ? 3 : 4),
                                       Text(
                                         article.source,
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(fontSize: sourceSize, color: Colors.grey, height: 1.1),
+                                        style: TextStyle(
+                                          fontSize: sourceSize,
+                                          color: Colors.grey,
+                                          height: 1.1,
+                                        ),
                                       ),
                                     ],
                                 ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
-                      ),
-                    );
-                  },
+                      );
+                    }).toList(),
+                  ),
                 ),
               );
             },

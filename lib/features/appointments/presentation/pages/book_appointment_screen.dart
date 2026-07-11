@@ -151,12 +151,9 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
             print('✅ الوقت المتاح: $timeStr');
           }
 
-          // إضافة 30 دقيقة
-          currentMinute += 30;
-          if (currentMinute >= 60) {
-            currentMinute -= 60;
-            currentHour += 1;
-          }
+          // إضافة ساعة كاملة فقط
+          currentHour += 1;
+          currentMinute = 0;
         }
       }
 
@@ -167,6 +164,176 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
         _availableTimes[workplaceName] = availableTimes;
       });
     }
+  }
+
+
+  Future<DateTime?> _showAvailabilityDatePicker() async {
+    if (_selectedDoctor == null || _selectedWorkplace == null) return null;
+    final today = DateTime.now();
+    final days = List.generate(31, (index) => DateTime(today.year, today.month, today.day + index));
+    final doctor = _doctors.firstWhere((d) => d['fullName'] == _selectedDoctor);
+    final doctorId = doctor['uid']?.toString() ?? '';
+
+    return showDialog<DateTime>(
+      context: context,
+      builder: (context) {
+        final theme = Theme.of(context);
+        return AlertDialog(
+          title: const Text('اختر تاريخ الحجز'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: FutureBuilder<Map<String, _DayAvailabilityStatus>>(
+              future: _loadMonthAvailability(doctorId, _selectedWorkplace!, days),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData) {
+                  return const SizedBox(height: 180, child: Center(child: CircularProgressIndicator()));
+                }
+                final statuses = snapshot.data!;
+                return SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: days.map((day) {
+                          final status = statuses[_appointmentDateKey(day)] ?? _DayAvailabilityStatus.offDay;
+                          final color = _availabilityColor(status, theme);
+                          final disabled = status == _DayAvailabilityStatus.full || status == _DayAvailabilityStatus.offDay;
+                          return InkWell(
+                            borderRadius: BorderRadius.circular(14),
+                            onTap: disabled ? null : () => Navigator.pop(context, day),
+                            child: Container(
+                              width: 54,
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              decoration: BoxDecoration(
+                                color: color.withOpacity(disabled ? .18 : .28),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(color: color, width: 1.2),
+                              ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(DateFormat('d', 'ar').format(day), style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
+                                  Text(DateFormat('E', 'ar').format(day), maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall),
+                                ],
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 16),
+                      _availabilityLegend(theme),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('إلغاء')),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _availabilityLegend(ThemeData theme) {
+    return Wrap(
+      spacing: 10,
+      runSpacing: 8,
+      children: const [
+        _LegendDot(color: Colors.green, label: 'متاح بالكامل'),
+        _LegendDot(color: Colors.amber, label: 'متاح جزئياً'),
+        _LegendDot(color: Colors.red, label: 'ممتلئ'),
+        _LegendDot(color: Colors.blue, label: 'لا يوجد دوام'),
+      ],
+    );
+  }
+
+  Color _availabilityColor(_DayAvailabilityStatus status, ThemeData theme) {
+    switch (status) {
+      case _DayAvailabilityStatus.free:
+        return Colors.green;
+      case _DayAvailabilityStatus.partial:
+        return Colors.amber;
+      case _DayAvailabilityStatus.full:
+        return Colors.red;
+      case _DayAvailabilityStatus.offDay:
+        return Colors.blue;
+    }
+  }
+
+  Future<Map<String, _DayAvailabilityStatus>> _loadMonthAvailability(String doctorId, String workplaceName, List<DateTime> days) async {
+    final result = <String, _DayAvailabilityStatus>{};
+    for (final day in days) {
+      result[_appointmentDateKey(day)] = await _getDayAvailabilityStatus(doctorId, workplaceName, day);
+    }
+    return result;
+  }
+
+  Future<_DayAvailabilityStatus> _getDayAvailabilityStatus(String doctorId, String workplaceName, DateTime date) async {
+    final totalSlots = _countWorkdaySlots(workplaceName, date);
+    if (totalSlots == 0) return _DayAvailabilityStatus.offDay;
+    final booked = await _loadBookedTimesForDay(doctorId, workplaceName, date);
+    if (booked.length >= totalSlots) return _DayAvailabilityStatus.full;
+    if (booked.isNotEmpty) return _DayAvailabilityStatus.partial;
+    return _DayAvailabilityStatus.free;
+  }
+
+  int _countWorkdaySlots(String workplaceName, DateTime date) {
+    final dayName = DateFormat('EEEE', 'ar').format(date);
+    final doctor = _doctors.firstWhere((d) => d['fullName'] == _selectedDoctor, orElse: () => {});
+    if (doctor.isEmpty) return 0;
+    final workplaces = List<Map<String, dynamic>>.from(doctor['workplaces'] ?? []);
+    final workplace = workplaces.firstWhere((wp) => wp['name'] == workplaceName, orElse: () => {});
+    if (workplace.isEmpty) return 0;
+    final workDays = Map<String, dynamic>.from(workplace['workDays'] ?? {});
+    final dayTimes = List<Map<String, dynamic>>.from(workDays[dayName] ?? []);
+    var count = 0;
+    for (final timeSlot in dayTimes) {
+      var currentHour = timeSlot['startHour'] as int;
+      final endHour = timeSlot['endHour'] as int;
+      while (currentHour < endHour) {
+        count++;
+        currentHour++;
+      }
+    }
+    return count;
+  }
+
+  Future<Set<String>> _loadBookedTimesForDay(String doctorId, String workplaceName, DateTime date) async {
+    final bookedTimes = <String>{};
+    final startOfDay = DateTime(date.year, date.month, date.day);
+    final endOfDay = DateTime(date.year, date.month, date.day, 23, 59, 59);
+    final snapshot = await _firestore
+        .collection('appointments')
+        .where('doctorId', isEqualTo: doctorId)
+        .get();
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+      final appointmentDate = data['date'] as Timestamp?;
+      final status = data['status'] as String?;
+      final time = data['time'] as String?;
+      if (data['workplace'] == workplaceName &&
+          appointmentDate != null &&
+          !appointmentDate.toDate().isBefore(startOfDay) &&
+          !appointmentDate.toDate().isAfter(endOfDay) &&
+          (status == 'pending' || status == 'confirmed') &&
+          time != null) {
+        bookedTimes.add(time);
+      }
+    }
+    final slotsSnapshot = await _firestore
+        .collection('appointment_slots')
+        .where('doctorId', isEqualTo: doctorId)
+        .where('dateKey', isEqualTo: _appointmentDateKey(date))
+        .get();
+    for (final slotDoc in slotsSnapshot.docs) {
+      final slotTime = slotDoc.data()['time']?.toString();
+      if (slotTime != null && slotTime.isNotEmpty) bookedTimes.add(slotTime);
+    }
+    return bookedTimes;
   }
 
   String _appointmentDateKey(DateTime date) => DateFormat('yyyyMMdd').format(date);
@@ -488,12 +655,7 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
                               ? 'اختر التاريخ'
                               : DateFormat('yyyy/MM/dd').format(_selectedDate!)),
                           onPressed: () async {
-                            final picked = await showDatePicker(
-                              context: context,
-                              initialDate: DateTime.now(),
-                              firstDate: DateTime.now(),
-                              lastDate: DateTime.now().add(const Duration(days: 30)),
-                            );
+                            final picked = await _showAvailabilityDatePicker();
                             if (picked != null) {
                               setState(() {
                                 _selectedDate = picked;
@@ -765,6 +927,31 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
             ),
           );
         }).toList(),
+      ],
+    );
+  }
+}
+
+enum _DayAvailabilityStatus { free, partial, full, offDay }
+
+class _LegendDot extends StatelessWidget {
+  final Color color;
+  final String label;
+
+  const _LegendDot({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(label, style: Theme.of(context).textTheme.bodySmall),
       ],
     );
   }
