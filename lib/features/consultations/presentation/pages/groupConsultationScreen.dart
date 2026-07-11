@@ -1,15 +1,19 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:record/record.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 import 'dart:io';
 
+import '../../../../core/config/medical_theme.dart';
 import '../../../../core/utils/doctor_image_utils.dart';
 import '../widgets/message_reactions_widget.dart';
 
@@ -21,11 +25,12 @@ class GroupConsultationScreen extends StatefulWidget {
 }
 
 class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
-  static const bool _preferInlineAttachments = false;
-  static const int _maxInlineAttachmentBytes = 600 * 1024;
+  static const int _maxInlineAttachmentBytes = 900 * 1024;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
-  final FirebaseStorage _storage = FirebaseStorage.instance;
+  final ImagePicker _imagePicker = ImagePicker();
+  final AudioRecorder _audioRecorder = AudioRecorder();
+  final AudioPlayer _audioPlayer = AudioPlayer();
 
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -35,12 +40,36 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
   Set<String> _hiddenMessageIds = <String>{};
 
   List<PlatformFile> _selectedFiles = [];
-  bool _cloudStorageBlocked = false;
+  bool _isRecording = false;
+  String? _playingMessageId;
+  Duration _audioDuration = Duration.zero;
+  Duration _audioPosition = Duration.zero;
+  final Map<String, String> _inlineAudioFiles = {};
 
   @override
   void initState() {
     super.initState();
     _loadHiddenMessages();
+    _configureAudioPlayer();
+  }
+
+
+  void _configureAudioPlayer() {
+    _audioPlayer.onPlayerStateChanged.listen((state) {
+      if (!mounted) return;
+      if (state == PlayerState.stopped || state == PlayerState.completed) {
+        setState(() {
+          _playingMessageId = null;
+          _audioPosition = Duration.zero;
+        });
+      }
+    });
+    _audioPlayer.onDurationChanged.listen((value) {
+      if (mounted) setState(() => _audioDuration = value);
+    });
+    _audioPlayer.onPositionChanged.listen((value) {
+      if (mounted) setState(() => _audioPosition = value);
+    });
   }
 
   @override
@@ -48,10 +77,26 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
     final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: theme.scaffoldBackgroundColor,
-        foregroundColor: theme.colorScheme.onSurface,
-        title: const Text("الاستشارة الجماعية"),
-        elevation: 0,
+        backgroundColor: theme.colorScheme.primary,
+        foregroundColor: Colors.white,
+        title: Row(
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: Colors.white.withOpacity(.18),
+              child: const Icon(Icons.groups_rounded, color: Colors.white),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                "الاستشارة الجماعية",
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+        elevation: 2,
         actions: [
           IconButton(
             tooltip: 'حذف جميع المحادثات من جهازي',
@@ -60,14 +105,26 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
           ),
         ],
       ),
-      body: SafeArea(
-        child: Column(
-          children: [
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              theme.colorScheme.primary.withOpacity(.06),
+              theme.scaffoldBackgroundColor,
+              ],
+          ),
+        ),
+        child: SafeArea(
+          child: Column(
+            children: [
             Expanded(child: _buildMessagesList()),
             if (_replyToMessage != null) _buildReplyPreview(),
             if (_selectedFiles.isNotEmpty) _buildSelectedFilesPreview(),
             _buildMessageInput(),
           ],
+          ),
         ),
       ),
     );
@@ -94,14 +151,14 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
 
         return ListView.builder(
           controller: _scrollController,
-          padding: const EdgeInsets.all(8),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           itemCount: messages.length,
           itemBuilder: (context, index) {
             final doc = messages[index];
             final message = doc.data() as Map<String, dynamic>;
             final isMe = message['senderId'] == _auth.currentUser?.uid;
             return GestureDetector(
-              onLongPress: () => _confirmHideMessage(doc.id),
+              onLongPress: () => _showMessageOptions(doc.id, message, isMe),
               onDoubleTap: () => setState(() => _replyToMessage = message),
               child: _buildMessageBubble(doc.id, message, isMe, theme, isDarkMode),
             );
@@ -143,7 +200,7 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
         separatorBuilder: (_, __) => const SizedBox(width: 8),
         itemBuilder: (context, index) {
           final file = _selectedFiles[index];
-          final ext = file.extension?.toLowerCase();
+          final ext = (file.extension ?? file.name.split('.').last).toLowerCase();
           final isImage = ext == 'jpg' || ext == 'jpeg' || ext == 'png' || ext == 'webp';
           return Stack(
             children: [
@@ -190,12 +247,24 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
           margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
-            color: isMe ?
-            Colors.blue[400] :
-            isDarkMode?
-            Colors.grey[800]
-                : Colors.white,
-            borderRadius: BorderRadius.circular(12),
+            color: isMe
+                ? MedicalTheme.primaryMedicalBlue
+                : isDarkMode
+                    ? const Color(0xFF1F2937)
+                    : Colors.white,
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(18),
+              topRight: const Radius.circular(18),
+              bottomLeft: Radius.circular(isMe ? 18 : 4),
+              bottomRight: Radius.circular(isMe ? 4 : 18),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(isDarkMode ? .18 : .08),
+                blurRadius: 10,
+                offset: const Offset(0, 4),
+              ),
+            ],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -235,6 +304,7 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
                     final file = _messageFiles(message)[index];
                     final fileType = (file['fileType'] ?? '').toString();
                     final isImage = fileType == 'image' || fileType == 'image_inline';
+                    final isAudio = fileType == 'audio' || fileType == 'audio_inline';
                     final fileUrl = (file['fileUrl'] ?? '').toString();
                     final fileBase64 = (file['fileBase64'] ?? '').toString();
                     return Padding(
@@ -266,25 +336,47 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
                           ),
                         ),
                       )
-                          : InkWell(
-                        onTap: () => _openGroupFile(
-                          messageId: '${messageId}_$index',
-                          fileUrl: fileUrl,
-                          fileBase64: fileBase64,
-                          fileName: (file['fileName'] ?? 'ملف مرفق').toString(),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.attach_file),
-                            const SizedBox(width: 5),
-                            Text(file['fileName'] ?? "ملف مرفق"),
-                          ],
-                        ),
-                      ),
+                          : isAudio
+                              ? _buildAudioMessage(
+                                  messageId: '${messageId}_$index',
+                                  audioUrl: fileUrl,
+                                  audioBase64: fileBase64,
+                                  theme: them,
+                                  isMe: isMe,
+                                )
+                              : InkWell(
+                                  onTap: () => _openGroupFile(
+                                    messageId: '${messageId}_$index',
+                                    fileUrl: fileUrl,
+                                    fileBase64: fileBase64,
+                                    fileName: (file['fileName'] ?? 'ملف مرفق').toString(),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.attach_file, color: isMe ? Colors.white : them.colorScheme.primary),
+                                      const SizedBox(width: 5),
+                                      Flexible(
+                                        child: Text(
+                                          file['fileName'] ?? "ملف مرفق",
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(color: isMe ? Colors.white : them.colorScheme.onSurface),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                     );
                   }),
                 ),
-              if ((message['text'] ?? '').isNotEmpty) Text(message['text']),
+              if ((message['text'] ?? '').isNotEmpty) Text(
+                message['text'],
+                style: TextStyle(
+                  color: isMe ? Colors.white : them.colorScheme.onSurface,
+                  fontSize: 15,
+                  height: 1.35,
+                ),
+              ),
               const SizedBox(height: 4),
 
               const SizedBox(height: 6),
@@ -299,12 +391,12 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
                 children: [
                   Text(
                     _formatTimestamp(message['timestamp']),
-                    style: TextStyle(color: isDarkMode? Colors.grey[300]:Colors.grey[600], fontSize: 10),
+                    style: TextStyle(color: isMe ? Colors.white70 : (isDarkMode? Colors.grey[300]:Colors.grey[600]), fontSize: 10),
                   ),
                   if (isMe)
                     Text(
                       '✓ تم الإرسال',
-                      style: TextStyle(color: isDarkMode? Colors.grey[300]: Colors.grey[600], fontSize: 10),
+                      style: TextStyle(color: isMe ? Colors.white70 : (isDarkMode? Colors.grey[300]: Colors.grey[600]), fontSize: 10),
                     ),
                 ],
               ),
@@ -348,8 +440,8 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
       child: Row(
         children: [
           IconButton(
-            icon: const Icon(Icons.attach_file),
-            onPressed: _pickFiles,
+            icon: const Icon(Icons.add_circle_outline_rounded),
+            onPressed: _showAttachmentSheet,
           ),
           Expanded(
             child: TextField(
@@ -361,15 +453,25 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
                 ),
                 contentPadding: const EdgeInsets.symmetric(horizontal: 16),
               ),
+              onChanged: (_) => setState(() {}),
               onSubmitted: (_) => _sendMessage(),
             ),
           ),
           const SizedBox(width: 8),
           CircleAvatar(
-            backgroundColor: Colors.blue,
+            backgroundColor: _isRecording ? Theme.of(context).colorScheme.error : MedicalTheme.primaryMedicalBlue,
             child: IconButton(
-              icon: const Icon(Icons.send, color: Colors.white),
-              onPressed: _isSending ? null : _sendMessage,
+              icon: Icon(
+                _messageController.text.trim().isEmpty && _selectedFiles.isEmpty
+                    ? (_isRecording ? Icons.stop_circle_rounded : Icons.mic_rounded)
+                    : Icons.send,
+                color: Colors.white,
+              ),
+              onPressed: _isSending
+                  ? null
+                  : (_messageController.text.trim().isEmpty && _selectedFiles.isEmpty)
+                      ? _toggleVoiceRecording
+                      : _sendMessage,
             ),
           ),
         ],
@@ -391,7 +493,7 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
       final List<Map<String, String>> files = [];
 
       for (final file in _selectedFiles) {
-        final uploadedFile = await _uploadGroupFileWithFallback(file);
+        final uploadedFile = await _encodeGroupFileInline(file);
         files.add(uploadedFile);
       }
 
@@ -437,71 +539,216 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
 
   bool _canStoreInline(int byteLength) => byteLength <= _maxInlineAttachmentBytes;
 
-  String _groupAttachmentStoragePath(String fileName) {
-    return 'consultations/group_consultations/files/${DateTime.now().millisecondsSinceEpoch}_${_safeFileName(fileName)}';
-  }
-
-  Future<Map<String, String>> _uploadGroupFileWithFallback(PlatformFile file) async {
+  Future<Map<String, String>> _encodeGroupFileInline(PlatformFile file) async {
     final ext = (file.extension ?? file.name.split('.').last).toLowerCase();
     final isImage = ext == 'jpg' || ext == 'jpeg' || ext == 'png' || ext == 'webp';
-
-    final bytes = file.bytes ??
-        (file.path != null ? await File(file.path!).readAsBytes() : null);
+    final isAudio = ext == 'm4a' || ext == 'mp3' || ext == 'wav' || ext == 'aac';
+    final bytes = file.bytes ?? (file.path != null ? await File(file.path!).readAsBytes() : null);
     if (bytes == null || bytes.isEmpty) {
       throw Exception('الملف ${file.name} لا يحتوي بيانات');
     }
-
-    Map<String, String> inlineAttachment() {
-      return {
-        'fileType': isImage ? 'image_inline' : 'file_inline',
-        'fileBase64': base64Encode(bytes),
-        'fileName': file.name,
-      };
+    if (!_canStoreInline(bytes.length)) {
+      throw Exception('حجم الملف كبير جداً للإرسال داخل المحادثة بدون Firebase Storage');
     }
-
-    if ((_preferInlineAttachments || _cloudStorageBlocked) && _canStoreInline(bytes.length)) {
-      return inlineAttachment();
-    }
-
-    try {
-      final ref = _storage.ref().child(_groupAttachmentStoragePath(file.name));
-      final metadata = SettableMetadata(contentType: _resolveContentType(ext, isImage));
-      if (file.path != null) {
-        await ref.putFile(File(file.path!), metadata);
-      } else {
-        await ref.putData(bytes, metadata);
-      }
-      final url = await ref.getDownloadURL();
-      return {
-        'fileUrl': url,
-        'fileType': isImage ? 'image' : 'file',
-        'fileName': file.name,
-      };
-    } catch (e) {
-      final msg = e.toString().toLowerCase();
-      final storageRestricted = msg.contains('code\": 402') ||
-          msg.contains('httpresult: 402') ||
-          msg.contains('-13000') ||
-          msg.contains('spark pricing plan') ||
-          msg.contains('no longer supports') ||
-          msg.contains('terminated the upload session');
-      if (storageRestricted) {
-        _cloudStorageBlocked = true;
-      }
-
-      if (_canStoreInline(bytes.length)) {
-        return inlineAttachment();
-      }
-
-      throw Exception('تعذر رفع الملف إلى التخزين، والملف كبير جداً للإرسال داخل الرسالة');
-    }
+    return {
+      'fileType': isAudio ? 'audio_inline' : (isImage ? 'image_inline' : 'file_inline'),
+      'fileBase64': base64Encode(bytes),
+      'fileName': file.name,
+    };
   }
 
   Future<void> _pickFiles() async {
     final result = await FilePicker.platform.pickFiles(allowMultiple: false, withData: true);
-    if (result != null) {
-      setState(() => _selectedFiles = result.files);
+    if (result != null) setState(() => _selectedFiles = result.files);
+  }
+
+  Future<void> _pickImage(ImageSource source) async {
+    final picked = await _imagePicker.pickImage(source: source);
+    if (picked == null) return;
+    setState(() {
+      _selectedFiles = [
+        PlatformFile(
+          name: picked.name,
+          path: picked.path,
+          size: File(picked.path).lengthSync(),
+        ),
+      ];
+    });
+  }
+
+  void _showAttachmentSheet() {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _attachmentAction(Icons.image_rounded, 'صورة', () => _pickImage(ImageSource.gallery)),
+              _attachmentAction(Icons.camera_alt_rounded, 'كاميرا', () => _pickImage(ImageSource.camera)),
+              _attachmentAction(Icons.attach_file_rounded, 'ملف', _pickFiles),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _attachmentAction(IconData icon, String label, VoidCallback action) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: () {
+        Navigator.pop(context);
+        action();
+      },
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircleAvatar(radius: 24, backgroundColor: MedicalTheme.primaryMedicalBlue.withOpacity(.12), child: Icon(icon, color: MedicalTheme.primaryMedicalBlue)),
+            const SizedBox(height: 8),
+            Text(label),
+          ],
+        ),
+      ),
+    );
+  }
+
+
+  Future<void> _toggleVoiceRecording() async {
+    if (_isRecording) {
+      final path = await _audioRecorder.stop();
+      if (!mounted) return;
+      setState(() => _isRecording = false);
+      if (path == null) return;
+      final file = File(path);
+      if (!await file.exists()) {
+        _showSnackBar('تعذر العثور على ملف التسجيل');
+        return;
+      }
+      setState(() {
+        _selectedFiles = [
+          PlatformFile(
+            name: 'voice_${DateTime.now().millisecondsSinceEpoch}.m4a',
+            path: path,
+            size: file.lengthSync(),
+          ),
+        ];
+      });
+      _showSnackBar('تم إرفاق التسجيل الصوتي، اضغط إرسال');
+      return;
     }
+
+    final micStatus = await Permission.microphone.request();
+    if (!micStatus.isGranted || !await _audioRecorder.hasPermission()) {
+      _showSnackBar('يلزم إذن الميكروفون لتسجيل الرسائل الصوتية');
+      return;
+    }
+    final path = '${Directory.systemTemp.path}/group_voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+    await _audioRecorder.start(
+      const RecordConfig(encoder: AudioEncoder.aacLc),
+      path: path,
+    );
+    if (mounted) setState(() => _isRecording = true);
+  }
+
+  Widget _buildAudioMessage({
+    required String messageId,
+    required String audioUrl,
+    required String audioBase64,
+    required ThemeData theme,
+    required bool isMe,
+  }) {
+    final isPlaying = _playingMessageId == messageId;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: isMe ? Colors.white.withOpacity(.16) : theme.colorScheme.primaryContainer.withOpacity(.35),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            onPressed: () => _playOrPauseAudio(
+              messageId: messageId,
+              audioUrl: audioUrl.isNotEmpty ? audioUrl : null,
+              inlineAudioBase64: audioBase64.isNotEmpty ? audioBase64 : null,
+            ),
+            icon: Icon(
+              isPlaying ? Icons.pause_circle_filled_rounded : Icons.play_circle_fill_rounded,
+              color: isMe ? Colors.white : theme.colorScheme.primary,
+              size: 30,
+            ),
+          ),
+          SizedBox(
+            width: 140,
+            child: Slider(
+              value: (isPlaying && _audioDuration.inMilliseconds > 0)
+                  ? _audioPosition.inMilliseconds.clamp(0, _audioDuration.inMilliseconds).toDouble()
+                  : 0,
+              max: _audioDuration.inMilliseconds > 0 ? _audioDuration.inMilliseconds.toDouble() : 1,
+              onChanged: isPlaying
+                  ? (value) => _audioPlayer.seek(Duration(milliseconds: value.toInt()))
+                  : null,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _playOrPauseAudio({
+    required String messageId,
+    String? audioUrl,
+    String? inlineAudioBase64,
+  }) async {
+    try {
+      if (_playingMessageId == messageId) {
+        await _audioPlayer.pause();
+        setState(() => _playingMessageId = null);
+        return;
+      }
+      await _audioPlayer.stop();
+      String? path;
+      if (audioUrl != null && audioUrl.isNotEmpty) {
+        path = await _downloadRemoteAudioToFile(messageId: messageId, audioUrl: audioUrl);
+      }
+      if (path == null && inlineAudioBase64 != null && inlineAudioBase64.isNotEmpty) {
+        path = await _createInlineAudioFile(messageId: messageId, base64Data: inlineAudioBase64);
+      }
+      if (path == null) {
+        _showSnackBar('لا يوجد ملف صوتي للتشغيل');
+        return;
+      }
+      await _audioPlayer.play(DeviceFileSource(path));
+      setState(() => _playingMessageId = messageId);
+    } catch (_) {
+      _showSnackBar('تعذر تشغيل الرسالة الصوتية');
+    }
+  }
+
+  Future<String?> _downloadRemoteAudioToFile({required String messageId, required String audioUrl}) async {
+    try {
+      final response = await http.get(Uri.parse(audioUrl));
+      if (response.statusCode != 200) return null;
+      final path = '${Directory.systemTemp.path}/remote_group_voice_$messageId.m4a';
+      await File(path).writeAsBytes(response.bodyBytes, flush: true);
+      return path;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<String> _createInlineAudioFile({required String messageId, required String base64Data}) async {
+    if (_inlineAudioFiles.containsKey(messageId)) return _inlineAudioFiles[messageId]!;
+    final path = '${Directory.systemTemp.path}/inline_group_voice_$messageId.m4a';
+    await File(path).writeAsBytes(base64Decode(base64Data), flush: true);
+    _inlineAudioFiles[messageId] = path;
+    return path;
   }
 
   Future<void> _loadHiddenMessages() async {
@@ -515,6 +762,65 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
   Future<void> _saveHiddenMessages() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_hiddenMessagesKey, _hiddenMessageIds.toList());
+  }
+
+
+  Future<void> _showMessageOptions(String messageId, Map<String, dynamic> message, bool isMe) async {
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.reply_rounded),
+              title: const Text('رد على الرسالة'),
+              onTap: () => Navigator.pop(context, 'reply'),
+            ),
+            if (isMe)
+              ListTile(
+                leading: const Icon(Icons.delete_forever_rounded, color: Colors.red),
+                title: const Text('حذف الرسالة من الطرفين'),
+                onTap: () => Navigator.pop(context, 'delete'),
+              )
+            else
+              ListTile(
+                leading: const Icon(Icons.delete_outline_rounded),
+                title: const Text('حذف من جهازي'),
+                onTap: () => Navigator.pop(context, 'hide'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == 'reply') {
+      setState(() => _replyToMessage = message);
+    } else if (selected == 'delete') {
+      await _confirmDeleteMessage(messageId);
+    } else if (selected == 'hide') {
+      await _confirmHideMessage(messageId);
+    }
+  }
+
+  Future<void> _confirmDeleteMessage(String messageId) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('حذف الرسالة'),
+        content: const Text('هل تريد حذف الرسالة من الطرفين؟'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('إلغاء')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('حذف', style: TextStyle(color: Colors.red))),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _firestore.collection('group_consultations').doc(messageId).delete();
+    } catch (_) {
+      _showSnackBar('فشل في حذف الرسالة');
+    }
   }
 
   Future<void> _confirmHideMessage(String messageId) async {
@@ -627,6 +933,8 @@ class _GroupConsultationScreenState extends State<GroupConsultationScreen> {
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
+    _audioRecorder.dispose();
+    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -643,6 +951,25 @@ class ImagePreviewScreen extends StatelessWidget {
   final String imageUrl;
   final String imageBase64;
   const ImagePreviewScreen({super.key, required this.imageUrl, this.imageBase64 = ''});
+
+
+  void _configureAudioPlayer() {
+    _audioPlayer.onPlayerStateChanged.listen((state) {
+      if (!mounted) return;
+      if (state == PlayerState.stopped || state == PlayerState.completed) {
+        setState(() {
+          _playingMessageId = null;
+          _audioPosition = Duration.zero;
+        });
+      }
+    });
+    _audioPlayer.onDurationChanged.listen((value) {
+      if (mounted) setState(() => _audioDuration = value);
+    });
+    _audioPlayer.onPositionChanged.listen((value) {
+      if (mounted) setState(() => _audioPosition = value);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
