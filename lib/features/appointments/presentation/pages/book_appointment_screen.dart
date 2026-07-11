@@ -454,12 +454,14 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
     final appointmentsQuery = _firestore
         .collection('appointments')
         .where('doctorId', isEqualTo: doctorId)
+        .where('workplace', isEqualTo: workplaceName)
         .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(firstVisibleDay))
         .where('date', isLessThanOrEqualTo: Timestamp.fromDate(lastVisibleDay))
         .get();
     final slotsQuery = _firestore
         .collection('appointment_slots')
         .where('doctorId', isEqualTo: doctorId)
+        .where('workplace', isEqualTo: workplaceName)
         .where('dateKey', isGreaterThanOrEqualTo: _appointmentDateKey(firstVisibleDay))
         .where('dateKey', isLessThanOrEqualTo: _appointmentDateKey(lastVisibleDay))
         .get();
@@ -473,8 +475,7 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
       final status = data['status'] as String?;
       final time = data['time'] as String?;
       final date = data['date'] as Timestamp?;
-      if (data['workplace'] == workplaceName &&
-          date != null &&
+      if (date != null &&
           time != null &&
           (status == 'pending' || status == 'confirmed')) {
         bookedByDate.putIfAbsent(_appointmentDateKey(date.toDate()), () => <String>{}).add(time);
@@ -485,7 +486,7 @@ class _BookAppointmentScreenState extends State<BookAppointmentScreen> {
       final data = slotDoc.data();
       final dateKey = data['dateKey']?.toString();
       final time = data['time']?.toString();
-      if (data['workplace'] == workplaceName && dateKey != null && time != null) {
+      if (dateKey != null && time != null) {
         bookedByDate.putIfAbsent(dateKey, () => <String>{}).add(time);
       }
     }
