@@ -191,7 +191,6 @@ class _MedicalNewsWidgetState extends State<MedicalNewsWidget> {
                                         ),
                                       ),
                                     ],
-                                  ),
                                 ),
                               ),
                             ],
